@@ -17,6 +17,7 @@ class ReplayBuffer(object):
         self.buffer.append((s0[None, :], a, r, s1[None, :], done))
 
     def sample(self, batch_size):
+        #s0, agent, reward
         s0, a, r, s1, done = zip(*random.sample(self.buffer, batch_size))
         return np.concatenate(s0), a, r, np.concatenate(s1), done
 
@@ -41,7 +42,7 @@ class G2RLAgent:
     def learning(self, fr, lr = 0.0001, update_tar_interval = 1):
         #optim method la RMS prop thep paper
         self.model_optim = RMSprop(self.model.parameters(), lr=lr)
-
+        #s0, agent, reward
         s0, a, r, s1, done = self.buffer.sample(self.config.batch_size)
 
         s0 = torch.tensor(s0, dtype=torch.float)
