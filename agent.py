@@ -24,7 +24,7 @@ class ReplayBuffer(object):
         return len(self.buffer)
 
 class G2RLAgent:
-    def __init__(self, input_embedding = 256, maxbuff = 10, pre_train = False, use_cuda = False, ):
+    def __init__(self, input_embedding = 256, maxbuff = 10, pre_train = False, use_cuda = False ):
         self.use_cuda = use_cuda
         self.config = config
         self.is_training = True
@@ -36,11 +36,12 @@ class G2RLAgent:
             self.target_model.load_state_dict()
         else:
             self.target_model.init_xavier()
-        #optim la RMS prop thep paper
-        self.model_optim = RMSprop(self.model.parameters(), lr=self.config.learning_rate)
+        self.model_optim = None
 
+    def learning(self, fr, lr = 0.0001, update_tar_interval = 1):
+        #optim method la RMS prop thep paper
+        self.model_optim = RMSprop(self.model.parameters(), lr=lr)
 
-    def learning(self, fr):
         s0, a, r, s1, done = self.buffer.sample(self.config.batch_size)
 
         s0 = torch.tensor(s0, dtype=torch.float)
@@ -59,6 +60,7 @@ class G2RLAgent:
         q_values = self.model(s0).cuda()
         next_q_values = self.model(s1).cuda()
         next_q_state_values = self.target_model(s1).cuda()
+
         # tính reward đơn giản, chưa theo paper
         q_value = q_values.gather(1, a.unsqueeze(1)).squeeze(1)
         next_q_value = next_q_state_values.gather(1, next_q_values.max(1)[1].unsqueeze(1)).squeeze(1)
@@ -71,7 +73,7 @@ class G2RLAgent:
         loss.backward()
         self.model_optim.step()
 
-        if fr % self.config.update_tar_interval == 0:
+        if fr % update_tar_interval == 0:
             self.target_model.load_state_dict(self.model.state_dict())
 
         return loss.item()
