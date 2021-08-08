@@ -4,7 +4,7 @@ import torch
 from model import G2RL
 import random
 import numpy as np
-
+from torch.optim import RMSprop
 
 class ReplayBuffer(object):
     def __init__(self, capacity):
@@ -24,10 +24,11 @@ class ReplayBuffer(object):
         return len(self.buffer)
 
 class G2RLAgent:
-    def __init__(self, input_embedding = 256, maxbuff = 10, pre_train = False ):
+    def __init__(self, input_embedding = 256, maxbuff = 10, pre_train = False, use_cuda = False, ):
+        self.use_cuda = use_cuda
         self.config = config
         self.is_training = True
-        self.buffer = ReplayBuffer(capacity=5)
+        self.buffer = ReplayBuffer(capacity=maxbuff)
 
         self.model = G2RL(input_embedding).cuda()
         self.target_model = G2RL(input_embedding).cuda()
@@ -35,19 +36,9 @@ class G2RLAgent:
             self.target_model.load_state_dict()
         else:
             self.target_model.init_xavier()
-        # self.model_optim = Adam(self.model.parameters(), lr=self.config.learning_rate)
+        #optim la RMS prop thep paper
+        self.model_optim = RMSprop(self.model.parameters(), lr=self.config.learning_rate)
 
-    def act(self, state, epsilon=None):
-        if epsilon is None: epsilon = self.config.epsilon_min
-        if random.random() > epsilon or not self.is_training:
-            state = torch.tensor(state, dtype=torch.float).unsqueeze(0)
-            if self.config.use_cuda:
-                state = state.cuda()
-            q_value = self.model.forward(state)
-            action = q_value.max(1)[1].item()
-        else:
-            action = random.randrange(self.config.action_dim)
-        return action
 
     def learning(self, fr):
         s0, a, r, s1, done = self.buffer.sample(self.config.batch_size)
@@ -58,7 +49,7 @@ class G2RLAgent:
         r = torch.tensor(r, dtype=torch.float)
         done = torch.tensor(done, dtype=torch.float)
 
-        if self.config.use_cuda:
+        if self.use_cuda:
             s0 = s0.cuda()
             s1 = s1.cuda()
             a = a.cuda()
@@ -68,11 +59,12 @@ class G2RLAgent:
         q_values = self.model(s0).cuda()
         next_q_values = self.model(s1).cuda()
         next_q_state_values = self.target_model(s1).cuda()
-
+        # tính reward đơn giản, chưa theo paper
         q_value = q_values.gather(1, a.unsqueeze(1)).squeeze(1)
         next_q_value = next_q_state_values.gather(1, next_q_values.max(1)[1].unsqueeze(1)).squeeze(1)
         expected_q_value = r + self.config.gamma * next_q_value * (1 - done)
-        # Notice that detach the expected_q_value
+
+        # backprop
         loss = (q_value - expected_q_value.detach()).pow(2).mean()
 
         self.model_optim.zero_grad()
