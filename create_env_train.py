@@ -1,17 +1,15 @@
 import gym
 from gym import spaces
 import numpy as np
-from collections import OrderedDict
 from threading import Lock
 import sys
 from matplotlib.colors import hsv_to_rgb
 import random
 import math
-import copy
 from od_mstar3.od_mstar import find_path
 from od_mstar3.col_set_addition import NoSolutionError, OutOfTimeError
-
-# from gym.envs.classic_control import rendering
+from gym.envs.classic_control import rendering
+import time
 
 '''
     Observation: (position maps of current agent, current goal, other agents, other goals, obstacles)
@@ -30,16 +28,9 @@ actionDict = {v: k for k, v in dirDict.items()}
 
 
 class State(object):
-    '''
-    State.
-    Implemented as 2 2d numpy arrays.
-    first one "state":
-        static obstacle: -1
-        empty: 0
-        agent = positive integer (agent_id)
-    second one "goals":
-        agent goal = positive int(agent_id)
-    '''
+    """
+    todo : them dynamic vao code
+    """
 
     def __init__(self, world0, goals, diagonal, num_agents=1):
         assert (len(world0.shape) == 2 and world0.shape == goals.shape)
@@ -134,6 +125,41 @@ class State(object):
         else:
             return 0
 
+    def move_dynamic(self, direction, dynamic_object):
+        ax = dynamic_object.x
+        ay = dynamic_object.y
+
+        # Not moving is always allowed
+        if (direction == (0, 0)):
+            dynamic_object.past_x = seldynamic_object.x
+
+        # Otherwise, let's look at the validity of the move
+        dx, dy = direction[0], direction[1]
+        if (ax + dx >= self.state.shape[0] or ax + dx < 0 or ay + dy >= self.state.shape[
+            1] or ay + dy < 0):  # out of bounds
+            return -1
+        if (self.state[ax + dx, ay + dy] < 0):  # collide with static obstacle
+            return -2
+        if (self.state[ax + dx, ay + dy] > 0):  # collide with robot
+            return -3
+        # check for diagonal collisions
+        if (self.diagonal):
+            if self.diagonalCollision(agent_id, (ax + dx, ay + dy)):
+                return -3
+        # No collision: we can carry out the action
+        self.state[ax, ay] = 0
+        self.state[ax + dx, ay + dy] = agent_id
+        self.agents_past[agent_id - 1] = self.agents[agent_id - 1]
+        self.agents[agent_id - 1] = (ax + dx, ay + dy)
+        if self.goals[ax + dx, ay + dy] == agent_id:
+            return 1
+        elif self.goals[ax + dx, ay + dy] != agent_id and self.goals[ax, ay] == agent_id:
+            return 2
+        else:
+            return 0
+
+        pass
+
     # try to execture action and return whether action was executed or not and why
     # returns:
     #     2: action executed and left goal
@@ -165,6 +191,52 @@ class State(object):
         return numComplete == len(self.agents)  # , numComplete/float(len(self.agents))
 
 
+class DynamicObject(object):
+    def __init__(self, x, y, map):
+        self.x = x
+        self.y = y
+        self.past_x = x
+        self.past_y = y
+        self.current_moves = self.move_avaiable(map)
+
+    def move_avaiable(self, map):
+        # 0     1  2  3  4
+        # still N  E  S  W
+        ans = [0]
+        if self.y < map.shape[0] -2 :
+            if map[self.x][self.y + 1] == 0:
+                ans.append(2)
+        if  self.x < map.shape[0] -2 :
+            if map[self.x + 1][self.y] == 0 :
+                ans.append(1)
+        if self.x > 1 :
+            if map[self.x - 1][self.y] == 0 :
+                ans.append(3)
+        if self.y > 1 :
+            if map[self.x][self.y - 1] == 0 :
+                ans.append(4)
+        return ans
+
+    def move(self, action, map):
+        self.current_moves = self.move_avaiable(map)
+        if action not in self.current_moves:
+            return -1
+        if action == 0:
+            return 1
+        if action == 1:
+            self.x = self.x + 1
+            return 1
+        if action == 2:
+            self.y = self.y + 1
+            return 1
+        if action == 3:
+            self.x = self.x - 1
+            return 1
+        if action == 4:
+            self.y = self.y - 1
+            return 1
+
+
 class MAPFEnv(gym.Env):
     def getFinishReward(self):
         return FINISH_REWARD
@@ -173,7 +245,7 @@ class MAPFEnv(gym.Env):
 
     # Initialize env
     def __init__(self, num_agents=1, observation_size=10, world0=None, goals0=None, DIAGONAL_MOVEMENT=False,
-                 SIZE=(10, 40), PROB=(0.1, .5), FULL_HELP=False, blank_world=False):
+                 SIZE=(40, 40), PROB=(0.1, .5), FULL_HELP=False, blank_world=False):
         """
         Args:
             DIAGONAL_MOVEMENT: if the agents are allowed to move diagonally
@@ -183,6 +255,7 @@ class MAPFEnv(gym.Env):
         """
         # Initialize member variables
         self.num_agents = num_agents
+        self.dynamic_obs_list = []
         # a way of doing joint rewards
         self.individual_rewards = [0 for i in range(num_agents)]
         self.observation_size = observation_size
@@ -201,6 +274,9 @@ class MAPFEnv(gym.Env):
         else:
             self.action_space = spaces.Tuple([spaces.Discrete(self.num_agents), spaces.Discrete(5)])
         self.viewer = None
+
+    # def _set_dynamic_obstacles(self, rate):
+    #     for i in range(number):
 
     def isConnected(self, world0):
         sys.setrecursionlimit(10000)
@@ -338,6 +414,21 @@ class MAPFEnv(gym.Env):
         self.initial_world = world
         self.initial_goals = goals
         self.world = State(world, goals, self.DIAGONAL_MOVEMENT, num_agents=self.num_agents)
+
+    def observe(self, agent_id):
+        assert (agent_id > 0)
+        top_left = [self.world.getPos(agent_id)[0] - self.observation_size // 2,
+                    self.world.getPos(agent_id)[1] - self.observation_size // 2]
+        bottom_right = [top_left[0] + self.observation_size, top_left[1] + self.observation_size]
+        if top_left[0] < 0:
+            top_left[0] = 0
+        if top_left[1] < 0:
+            top_left[1] = 0
+        if bottom_right[0] > self.SIZE[0]:
+            bottom_right[0] = self.SIZE[0]
+        if bottom_right[1] > self.SIZE[0]:
+            bottom_right[1] = self.SIZE[0]
+        return env.world.state[top_left[0]:bottom_right[0], top_left[1]: bottom_right[1]]
 
     # Returns an observation of an agent
     def _observe(self, agent_id):
@@ -512,12 +603,19 @@ class MAPFEnv(gym.Env):
         '''robots is a list of robots to add to the world'''
         for (i, j) in robots:
             world[i, j] = 1
+        for i in range(world.shape[0]):
+            for j in range(world.shape[1]):
+                world[i][j] = -world[i][j]
         try:
-            path = find_path(world, [start], [goal], 1, 5)
+            path = find_path(world, [start], [goal])
         except NoSolutionError:
             path = None
         for (i, j) in robots:
             world[i, j] = 0
+        for i in range(world.shape[0]):
+            for j in range(world.shape[1]):
+                world[i][j] = -world[i][j]
+
         return path
 
     def get_blocking_reward(self, agent_id):
@@ -557,11 +655,11 @@ class MAPFEnv(gym.Env):
 
     # Executes an action by an agent
     def _step(self, action_input, episode=0):
+        self.step_obs_dynamic()
         # episode is an optional variable which will be used on the reward discounting
         self.fresh = False
         n_actions = 9 if self.DIAGONAL_MOVEMENT else 5
-
-        # Check action input
+                    # Check action input
         assert len(action_input) == 2, 'Action input should be a tuple with the form (agent_id, action)'
         assert action_input[1] in range(n_actions), 'Invalid action'
         assert action_input[0] in range(1, self.num_agents + 1)
@@ -630,7 +728,7 @@ class MAPFEnv(gym.Env):
                         reward += self.individual_rewards[i] / (v * 2)
 
         # Perform observation
-        state = self._observe(agent_id)
+        state = self.observe(agent_id)
 
         # Done?
         done = self.world.done()
@@ -720,7 +818,7 @@ class MAPFEnv(gym.Env):
         self.viewer.add_onetime(circ)
 
     def initColors(self):
-        c = {a + 1: hsv_to_rgb(np.array([a / float(self.num_agents), 1, 1])) for a in range(self.num_agents)}
+        c = {a-2: hsv_to_rgb(np.array([a / float(self.num_agents), 1, 1])) for a in range(6)}
         return c
 
     def _render(self, mode='human', close=False, screen_width=800, screen_height=800, action_probs=None):
@@ -744,10 +842,12 @@ class MAPFEnv(gym.Env):
                     if (self.world.state[i, j] != -1 and not scanning):  # free
                         start = j
                         scanning = True
+
                     if ((j == self.world.state.shape[1] - 1 or self.world.state[i, j] == -1) and scanning):
                         end = j + 1 if j == self.world.state.shape[1] - 1 else j
                         scanning = False
                         write = True
+
                     if write:
                         x = i * size
                         y = start * size
@@ -765,8 +865,16 @@ class MAPFEnv(gym.Env):
             color = colors[self.world.goals[i, j]]
             self.create_circle(x, y, size, size, color)
             if self.world.getGoal(agent) == self.world.getPos(agent):
-                color = (0, 0, 0)
+                color = (0, 0, 3)
                 self.create_circle(x, y, size, size, color)
+        for dynamic_obs in self.dynamic_obs_list :
+            i, j = dynamic_obs.x, dynamic_obs.y
+            x = i * size
+            y = j * size
+            color = [0,0,5]
+            self.create_rectangle(x, y, size, size, color)
+
+
         if action_probs is not None:
             n_moves = 9 if self.DIAGONAL_MOVEMENT else 5
             for agent in range(1, self.num_agents + 1):
@@ -782,13 +890,40 @@ class MAPFEnv(gym.Env):
         self.reset_renderer = False
         result = self.viewer.render(return_rgb_array=mode == 'rgb_array')
         return result
+    def init_dynamic_obs(self, prob = 0.2):
+        for i in range(env.SIZE[0]-3):
+            for j in range(env.SIZE[1]-3):
+                if (self.world.state[i][j] == 0) and random.randint(1,10) < prob*10 :
+                    self.world.state[i][j] = -2
+                    self.dynamic_obs_list.append(DynamicObject(x = i, y = j, map=self.world.state))
 
+    def step_obs_dynamic(self):
+        for dynamic_obs in self.dynamic_obs_list:
+            if random.randint(1,10) < 5 :
+                x,y = dynamic_obs.x, dynamic_obs.y
+                if dynamic_obs.move(random.choice([1,2,3,4]), env.world.state) :
+                    self.world.state[x][y] = 0
+                    self.world.state[dynamic_obs.x][dynamic_obs.y] = -2
+
+
+
+    def update_dynamic_obs(self):
+        for i in range(env.SIZE[0]-1):
+            # self.world.state[i][2] = -1
+            for j in range(env.SIZE[1]-1):
+                if self.world.state[i][j] == -1 and self.world.state[i][j+1] == 0:
+                    self.world.state[i][j] = 0
 
 if __name__ == '__main__':
-    env = MAPFEnv(PROB=(.3, .5), SIZE=(50, 50), DIAGONAL_MOVEMENT=False)
-    # while True :
-    #     env._render()
-    #     env._step([1,2])
-    #     print("1")
-    #     env._step([1,1])
-    #     print("2")
+    env = MAPFEnv(PROB=(.3, .4), SIZE=(100, 100), DIAGONAL_MOVEMENT=False, observation_size=30)
+    env.world.state[1,1] = -1
+    env.world.state[1,5] = -1
+    # env.update_dynamic_obs()
+    a = env.astar(env.world.state, start=(env.world.getPos(1)), goal= env.world.getGoal(1))
+    print(a)
+    while True:
+        print(env._render())
+        env.world.state[0][0] = -1
+        env._step([1,3])
+        time.sleep(0.1)
+
