@@ -15,7 +15,7 @@ class ReplayBuffer(object):
         if len(self.buffer) >= self.capacity:
             self.buffer.pop(0)
         self.buffer.append((s0[None, :], a, r, s1[None, :], done))
-
+2
     def sample(self, batch_size):
         #s0, agent, reward
         s0, a, r, s1, done = zip(*random.sample(self.buffer, batch_size))

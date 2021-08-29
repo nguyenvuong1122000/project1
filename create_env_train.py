@@ -1,4 +1,5 @@
 import gym
+import torch
 from gym import spaces
 import numpy as np
 from threading import Lock
@@ -8,7 +9,8 @@ import random
 import math
 from od_mstar3.od_mstar import find_path
 from od_mstar3.col_set_addition import NoSolutionError, OutOfTimeError
-from gym.envs.classic_control import rendering
+import copy
+# from gym.envs.classic_control import rendering
 import time
 
 '''
@@ -21,6 +23,10 @@ import time
     Reward: ACTION_COST for each action, GOAL_REWARD when robot arrives at target
 '''
 ACTION_COST, IDLE_COST, GOAL_REWARD, COLLISION_REWARD, FINISH_REWARD, BLOCKING_COST = -0.3, -.5, 0.0, -2., 20., -1.
+r1 = -0.01
+r2 = -0.1
+r3 = 0.1
+
 opposite_actions = {0: -1, 1: 3, 2: 4, 3: 1, 4: 2, 5: 7, 6: 8, 7: 5, 8: 6}
 JOINT = False  # True for joint estimation of rewards for closeby agents
 dirDict = {0: (0, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1), 4: (-1, 0), 5: (1, 1), 6: (1, -1), 7: (-1, -1), 8: (-1, 1)}
@@ -94,7 +100,7 @@ class State(object):
     def moveAgent(self, direction, agent_id):
         ax = self.agents[agent_id - 1][0]
         ay = self.agents[agent_id - 1][1]
-
+        print(self.getPos(1))
         # Not moving is always allowed
         if (direction == (0, 0)):
             self.agents_past[agent_id - 1] = self.agents[agent_id - 1]
@@ -104,11 +110,14 @@ class State(object):
         dx, dy = direction[0], direction[1]
         if (ax + dx >= self.state.shape[0] or ax + dx < 0 or ay + dy >= self.state.shape[
             1] or ay + dy < 0):  # out of bounds
+            print("out of bounds")
             return -1
-        if (self.state[ax + dx, ay + dy] < 0):  # collide with static obstacle
+        if (self.state[ax + dx, ay + dy] == -1):  # collide with static obstacle
+            print("collide with static obstacle")
+            return -1
+        if (self.state[ax + dx, ay + dy] == -2):  # collide with dynamic obstacle
+            print("collide with dynamic obstacle")
             return -2
-        if (self.state[ax + dx, ay + dy] > 0):  # collide with robot
-            return -3
         # check for diagonal collisions
         if (self.diagonal):
             if self.diagonalCollision(agent_id, (ax + dx, ay + dy)):
@@ -118,6 +127,9 @@ class State(object):
         self.state[ax + dx, ay + dy] = agent_id
         self.agents_past[agent_id - 1] = self.agents[agent_id - 1]
         self.agents[agent_id - 1] = (ax + dx, ay + dy)
+
+        print(self.getPos(1))
+
         if self.goals[ax + dx, ay + dy] == agent_id:
             return 1
         elif self.goals[ax + dx, ay + dy] != agent_id and self.goals[ax, ay] == agent_id:
@@ -160,14 +172,7 @@ class State(object):
 
         pass
 
-    # try to execture action and return whether action was executed or not and why
-    # returns:
-    #     2: action executed and left goal
-    #     1: action executed and reached goal (or stayed on)
-    #     0: action executed
-    #    -1: out of bounds
-    #    -2: collision with wall
-    #    -3: collision with robot
+
     def act(self, action, agent_id):
         # 0     1  2  3  4
         # still N  E  S  W
@@ -244,8 +249,8 @@ class MAPFEnv(gym.Env):
     metadata = {"render.modes": ["human", "ansi"]}
 
     # Initialize env
-    def __init__(self, num_agents=1, observation_size=10, world0=None, goals0=None, DIAGONAL_MOVEMENT=False,
-                 SIZE=(40, 40), PROB=(0.1, .5), FULL_HELP=False, blank_world=False):
+    def __init__(self, num_agents=1, observation_size=30, world0=None, goals0=None, DIAGONAL_MOVEMENT=False,
+                 SIZE=(40, 40), PROB=(0.1, .5), FULL_HELP=False, blank_world=False, train_mode = False):
         """
         Args:
             DIAGONAL_MOVEMENT: if the agents are allowed to move diagonally
@@ -256,6 +261,7 @@ class MAPFEnv(gym.Env):
         # Initialize member variables
         self.num_agents = num_agents
         self.dynamic_obs_list = []
+        self.train_mode = train_mode
         # a way of doing joint rewards
         self.individual_rewards = [0 for i in range(num_agents)]
         self.observation_size = observation_size
@@ -273,7 +279,10 @@ class MAPFEnv(gym.Env):
             self.action_space = spaces.Tuple([spaces.Discrete(self.num_agents), spaces.Discrete(9)])
         else:
             self.action_space = spaces.Tuple([spaces.Discrete(self.num_agents), spaces.Discrete(5)])
+        self.guide_chanel_state = copy.deepcopy(self.world.state)
         self.viewer = None
+        self.init_a_star_path()
+        self.a_star_path = self.astar(self.world.state, start=(self.world.getPos(1)), goal= self.world.getGoal(1))
 
     # def _set_dynamic_obstacles(self, rate):
     #     for i in range(number):
@@ -415,20 +424,7 @@ class MAPFEnv(gym.Env):
         self.initial_goals = goals
         self.world = State(world, goals, self.DIAGONAL_MOVEMENT, num_agents=self.num_agents)
 
-    def observe(self, agent_id):
-        assert (agent_id > 0)
-        top_left = [self.world.getPos(agent_id)[0] - self.observation_size // 2,
-                    self.world.getPos(agent_id)[1] - self.observation_size // 2]
-        bottom_right = [top_left[0] + self.observation_size, top_left[1] + self.observation_size]
-        if top_left[0] < 0:
-            top_left[0] = 0
-        if top_left[1] < 0:
-            top_left[1] = 0
-        if bottom_right[0] > self.SIZE[0]:
-            bottom_right[0] = self.SIZE[0]
-        if bottom_right[1] > self.SIZE[0]:
-            bottom_right[1] = self.SIZE[0]
-        return env.world.state[top_left[0]:bottom_right[0], top_left[1]: bottom_right[1]]
+
 
     # Returns an observation of an agent
     def _observe(self, agent_id):
@@ -437,30 +433,27 @@ class MAPFEnv(gym.Env):
                     self.world.getPos(agent_id)[1] - self.observation_size // 2)
         bottom_right = (top_left[0] + self.observation_size, top_left[1] + self.observation_size)
         obs_shape = (self.observation_size, self.observation_size)
-        goal_map = np.zeros(obs_shape)
-        poss_map = np.zeros(obs_shape)
-        goals_map = np.zeros(obs_shape)
-        obs_map = np.zeros(obs_shape)
+        obs_static_map = np.zeros(obs_shape)
+        free_map = np.zeros(obs_shape)
+        obs_dynamic_map = np.zeros(obs_shape)
         visible_agents = []
         for i in range(top_left[0], top_left[0] + self.observation_size):
             for j in range(top_left[1], top_left[1] + self.observation_size):
                 if i >= self.world.state.shape[0] or i < 0 or j >= self.world.state.shape[1] or j < 0:
                     # out of bounds, just treat as an obstacle
-                    obs_map[i - top_left[0], j - top_left[1]] = 1
+                    obs_static_map[i - top_left[0], j - top_left[1]] = 1
+                    free_map[i - top_left[0], j - top_left[1]] = 1
+                    obs_dynamic_map[i - top_left[0], j - top_left[1]] = 1
                     continue
+                if self.world.state[i, j] == -2:
+                    # obstacles static
+                    obs_static_map[i - top_left[0], j - top_left[1]] = 2
+                if self.world.state[i, j] == 0:
+                    # free cell
+                    free_map[i - top_left[0], j - top_left[1]] = 1
                 if self.world.state[i, j] == -1:
-                    # obstacles
-                    obs_map[i - top_left[0], j - top_left[1]] = 1
-                if self.world.state[i, j] == agent_id:
-                    # agent's position
-                    poss_map[i - top_left[0], j - top_left[1]] = 1
-                if self.world.goals[i, j] == agent_id:
-                    # agent's goal
-                    goal_map[i - top_left[0], j - top_left[1]] = 1
-                if self.world.state[i, j] > 0 and self.world.state[i, j] != agent_id:
-                    # other agents' positions
-                    visible_agents.append(self.world.state[i, j])
-                    poss_map[i - top_left[0], j - top_left[1]] = 1
+                    # obstacles_dynamic
+                    obs_dynamic_map[i - top_left[0], j - top_left[1]] = 3
 
         distance = lambda x1, y1, x2, y2: ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** .5
         for agent in visible_agents:
@@ -484,7 +477,7 @@ class MAPFEnv(gym.Env):
         if mag != 0:
             dx = dx / mag
             dy = dy / mag
-        return ([poss_map, goal_map, goals_map, obs_map], [dx, dy, mag])
+        return ([free_map, obs_static_map, obs_dynamic_map], [dx, dy, mag])
 
     # Resets environment
     def _reset(self, agent_id, world0=None, goals0=None):
@@ -677,58 +670,23 @@ class MAPFEnv(gym.Env):
         # Execute action & determine reward
         action_status = self.world.act(action, agent_id)
         valid_action = action_status >= 0
-        #     2: action executed and left goal
-        #     1: action executed and reached/stayed on goal
         #     0: action executed
-        #    -1: out of bounds
-        #    -2: collision with wall
-        #    -3: collision with robot
+        #    -1: collision with static obs
+        #    -2: collision with dynamic obs
         blocking = False
-        if action == 0:  # staying still
-            if action_status == 1:  # stayed on goal
-                reward = GOAL_REWARD
-                x = self.get_blocking_reward(agent_id)
-                reward += x
-                if x < 0:
-                    blocking = True
-            elif action_status == 0:  # stayed off goal
-                reward = IDLE_COST
-        else:  # moving
-            if (action_status == 1):  # reached goal
-                reward = GOAL_REWARD
-            elif (action_status == -3 or action_status == -2 or action_status == -1):  # collision
-                reward = COLLISION_REWARD
-            elif (action_status == 2):  # left goal
-                reward = ACTION_COST
+        count = self.astar(self.world.state, start=(self.world.getPos(1)), goal= self.world.getGoal(1)).__len__()
+        if action_status == 1:  # stayed on goal
+            reward = r1 + r3*self.a_star_path.__len__()
+        elif action_status == -1 or action_status == -2 :
+            reward = r1 + r2
+        elif action_status == 0 :
+            if (self.world.getPos(1),) in self.a_star_path:
+                reward = (self.a_star_path.__len__() - count) * r3 + r1
             else:
-                reward = ACTION_COST
-        self.individual_rewards[agent_id - 1] = reward
-
-        if JOINT:
-            visible = [False for i in range(self.num_agents)]
-            v = 0
-            # joint rewards based on proximity
-            for agent in range(1, self.num_agents + 1):
-                # tally up the visible agents
-                if agent == agent_id:
-                    continue
-                top_left = (self.world.getPos(agent_id)[0] - self.observation_size // 2, \
-                            self.world.getPos(agent_id)[1] - self.observation_size // 2)
-                pos = self.world.getPos(agent)
-                if pos[0] >= top_left[0] and pos[0] < top_left[0] + self.observation_size \
-                        and pos[1] >= top_left[1] and pos[1] < top_left[1] + self.observation_size:
-                    # if the agent is within the bounds for observation
-                    v += 1
-                    visible[agent - 1] = True
-            if v > 0:
-                reward = self.individual_rewards[agent_id - 1] / 2
-                # set the reward to the joint reward if we are
-                for i in range(self.num_agents):
-                    if visible[i]:
-                        reward += self.individual_rewards[i] / (v * 2)
+                reward = r1
 
         # Perform observation
-        state = self.observe(agent_id)
+        state = self._observe(agent_id)
 
         # Done?
         done = self.world.done()
@@ -739,11 +697,15 @@ class MAPFEnv(gym.Env):
 
         # on_goal estimation
         on_goal = self.world.getPos(agent_id) == self.world.getGoal(agent_id)
-
+        print(reward)
         # Unlock mutex
         self.mutex.release()
-        return state, reward, done, nextActions, on_goal, blocking, valid_action
 
+        if self.train_mode == True :
+            state = torch.Tensor(state)
+            reward = torch.Tensor(reward)
+
+        return state, reward, done, nextActions, on_goal, blocking, valid_action
     def _listNextValidActions(self, agent_id, prev_action=0, episode=0):
         available_actions = [0]  # staying still always allowed
 
@@ -857,8 +819,8 @@ class MAPFEnv(gym.Env):
             i, j = self.world.getPos(agent)
             x = i * size
             y = j * size
-            color = colors[self.world.state[i, j]]
-            self.create_rectangle(x, y, size, size, color)
+            color = [0,1,0]
+            self.create_circle(x, y, size, size, color)
             i, j = self.world.getGoal(agent)
             x = i * size
             y = j * size
@@ -873,7 +835,13 @@ class MAPFEnv(gym.Env):
             y = j * size
             color = [0,0,5]
             self.create_rectangle(x, y, size, size, color)
-
+        for i in range(self.SIZE[0]):
+            for j in  range(self.SIZE[1]):
+                if self.world.state[i][j] == -3 :
+                    x = i * size
+                    y = j * size
+                    color = [0, 1, 0]
+                    self.create_rectangle(x, y, size, size, color)
 
         if action_probs is not None:
             n_moves = 9 if self.DIAGONAL_MOVEMENT else 5
@@ -913,17 +881,68 @@ class MAPFEnv(gym.Env):
             for j in range(env.SIZE[1]-1):
                 if self.world.state[i][j] == -1 and self.world.state[i][j+1] == 0:
                     self.world.state[i][j] = 0
+    def move_by_location(self, location):
+        # 0     1  2  3  4
+        # still N  E  S  W
+        print(self.world.getPos(1))
+
+        a = location[0] - self.world.getPos(1)[0]
+        b = location[1] - self.world.getPos(1)[1]
+        self.world.moveAgent((a,b), 1)
+        print(self.world.getPos(1))
+
+
+    def print_path(self):
+        a = self.astar(self.world.state, start=(self.world.getPos(1)), goal= self.world.getGoal(1))
+        for i in range(1, a.__len__()-1) :
+            self.world.state[a[i][0][0]][a[i][0][1]] = -3
+    def init_a_star_path(self):
+        a = self.astar(self.world.state, start=(self.world.getPos(1)), goal= self.world.getGoal(1))
+        for i in range(1, a.__len__()-1) :
+            self.guide_chanel_state[a[i][0][0]][a[i][0][1]] = -3
+
+    def remove_path(self):
+        a = self.astar(self.world.state, start=(self.world.getPos(1)), goal= self.world.getGoal(1))
+        for i in range(1, a.__len__()-1) :
+            self.world.state[a[i][0][0]][a[i][0][1]] = 0
+
+
 
 if __name__ == '__main__':
-    env = MAPFEnv(PROB=(.3, .4), SIZE=(100, 100), DIAGONAL_MOVEMENT=False, observation_size=30)
-    env.world.state[1,1] = -1
-    env.world.state[1,5] = -1
-    # env.update_dynamic_obs()
-    a = env.astar(env.world.state, start=(env.world.getPos(1)), goal= env.world.getGoal(1))
-    print(a)
-    while True:
-        print(env._render())
-        env.world.state[0][0] = -1
-        env._step([1,3])
-        time.sleep(0.1)
+    env = MAPFEnv(PROB=(.3, .4), SIZE=(100, 100), DIAGONAL_MOVEMENT=False, observation_size=5 )
+    if env.astar(env.world.state, start=(env.world.getPos(1)), goal= env.world.getGoal(1)) == None :
+        env.reset()
+    env.print_path()
+    # env.print_path()
+    # a = env.astar(env.world.state, start=(env.world.getPos(1)), goal= env.world.getGoal(1))
+    # for i in a:
+    #     env._render()
+    #     env.move_by_location(i[0])
+    #     time.sleep(0.5)
+    # while True:
+    #     env._render()
+    # time.sleep(2)
+    # env.remove_path()
+    env.init_dynamic_obs()
+    #
+    # while True:
+    #     env.step_obs_dynamic()
+    #     env._setWorld()
+    #     print(env._step([1,1])[1])
+    #     env._render()
+    #     time.sleep(1)
+    #
+    #     print(env._step([1, 2])[1])
+    #     env._render()
+    #     time.sleep(1)
+    #
+    #     print(env._step([1, 3])[1])
+    #     env._render()
+    #     time.sleep(1)
+    #
+    #     print(env._step([1, 4])[1])
+    #     env._render()
+    #     time.sleep(1)
+
+
 
