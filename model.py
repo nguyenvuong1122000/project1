@@ -2,15 +2,28 @@ import torch
 import torch.autograd as autograd
 import torch.nn as nn
 from torch.autograd import Variable
+import torch.nn.functional as F
 
 use_cuda = False
 
 class backbone_CNN(nn.Module):
-    def __init__(self, in_channels = 3, out = 512):
+    def __init__(self, in_channels = 3):
         super(backbone_CNN, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=256, kernel_size=3)
 
-    pass
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=32, kernel_size=3, padding = 1, stride=1)
+        self.conv2 = nn.Conv2d(in_channels= 32, out_channels=64, kernel_size=3, padding = 1, stride=2)
+        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding = 1, stride=2)
+        self.linear1 = nn.Linear(in_features=2048, out_features=256)
+        self.linear2 = nn.Linear(in_features=256, out_features=5)
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+
+        x = torch.flatten(x, 1)
+
+        return F.softmax(self.linear2(self.linear1(x)))
+
 
 
 class LSTM_Cell(nn.Module):
@@ -49,6 +62,7 @@ class LSTM_Cell(nn.Module):
                 m.bias.data.zero_()
 
     def forward(self, x, h, c):
+        print(x)
         x = self.W(x)
         y = torch.cat((x, h), 1)
         i = self.Wy(y)
@@ -99,15 +113,18 @@ class G2RL(nn.Module):
     def __init__(self, input_embedding = 256):
         super(G2RL, self).__init__()
         self.backbone_CNN = backbone_CNN()
-        self.RNN_model = LSTM(input_embedding)
-        self.MLP = nn.Sequential(
-            nn.Linear(in_features=512, out_features=512),
-            nn.ReLU(),
-            nn.Linear(in_features=512, out_features=5),
-        )
+        # self.RNN_model = LSTM(input_embedding, feauture_size=256, batch_size=1, hidden_channels=256)
+        #
+        # self.MLP = nn.Sequential(
+        #     nn.Linear(in_features=256, out_features=512),
+        #     nn.ReLU(),
+        #     nn.Linear(in_features=512, out_features=5),
+        # )
     def forward(self, x):
         x = self.backbone_CNN(x)
-        x = self.MLP(RNN_model(x))
+        # print(x)
+        # x = self.MLP(self.RNN_model(x))
+
         return x
     def init_xavier(self):
         pass
